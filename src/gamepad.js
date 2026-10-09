@@ -3,6 +3,7 @@
 
 export const MAP = {
   shoot: 2, // X (Xbox) / Square (PS)
+  tackle: 1, // B (Xbox) / Circle (PS)
   switchPrev: 4, // LB / L1
   switchNext: 5, // RB / R1
   confirm: 0, // A / Cross

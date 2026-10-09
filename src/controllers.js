@@ -92,6 +92,12 @@ export function createControllers(deps) {
     slot.charge = 0;
   }
 
+  function startTackle(slot) {
+    if (!isPlayable(slot)) return;
+    const p = deps.teams[slot.team].players[slot.player];
+    deps.doTackle(p);
+  }
+
   function tickCharge(dt) {
     for (const s of slots) {
       if (s.charging) s.charge = Math.min(1, s.charge + dt / 0.9);
@@ -141,6 +147,7 @@ export function createControllers(deps) {
 
       if (pad.justPressed.includes(MAP.shoot)) startCharge(s);
       if (pad.justReleased.includes(MAP.shoot)) release(s);
+      if (pad.justPressed.includes(MAP.tackle)) startTackle(s);
       if (pad.justPressed.includes(MAP.switchPrev) || pad.justPressed.includes(MAP.switchNext)) switchPlayer(s);
       if (pad.justPressed.includes(MAP.confirm) && (state === 'menu' || state === 'ended')) deps.startMatch();
       else if (pad.justPressed.includes(MAP.restart) && state !== 'menu') deps.startMatch();
@@ -160,6 +167,7 @@ export function createControllers(deps) {
     release,
     resetCharges,
     switchPlayer,
+    startTackle,
     updatePads,
   };
 }

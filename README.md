@@ -60,6 +60,7 @@ connected):
 | Move | `WASD` / `Arrows` |
 | Sprint | `Shift` |
 | Shoot (hold to charge) | `Space` |
+| Tackle | `F` |
 | Switch player | `Q` / `E` / `Tab` |
 | Kick off / restart | `Enter` / `R` |
 
@@ -70,6 +71,7 @@ connected):
 | Move | Left stick / D-pad |
 | Sprint | `RT` (R2) |
 | Shoot (hold to charge) | `X` (Xbox) / `□` (PS) — hold, release to kick |
+| Tackle | `B` (Xbox) / `○` (PS) |
 | Switch player | `LB` (L1) |
 | Kick off / continue | `A` (Cross) or `Start` |
 | Restart match | `Start` (Options) |
@@ -99,6 +101,30 @@ Get near a slow ball and it sticks to your feet; turning carries it with you.
   `DROP_R` (1.15 m, e.g. after a wall clamp), kickoff/goal/full-time states.
 
 Tuning knobs live with the other constants at the top of `src/main.js`.
+
+## Tackling
+
+Press the tackle button (`F` / `B` / click) for a **lunge**: a 0.26 s dash that
+outruns sprinting and, while active, **homing-pulls you onto the ball** — so a
+nearby ball or opponent carrier can't be dodged by drifting half a metre.
+
+- **Lunge**: `TACKLE_SPEED` 13.5 m/s, launched face-first down your current
+  movement direction. Steering (stick / buttons / AI) is locked out for the
+  lunge — the ball is the only thing that bends your path. Ends in `TACKLE_TIME`
+  seconds; next lunge available after `TACKLE_CD` 0.75 s.
+- **Magnet**: within `TACKLE_MAGNET_R` 2.4 m and roughly ahead of you, the run
+  bends toward a *lead point* on the ball (position + velocity × 0.12), so you
+  connect even as the ball rolls or the carrier shifts.
+- **On contact with an opponent carrier**: dispossession (same pop-out as before)
+  is forced at the wider `TACKLE_RANGE` (1.21 m) instead of the usual 1.05 m,
+  and the carrier is **shoved** with `TACKLE_KNOCK` 8 m/s away from you — the
+  push is what lets you run off with the loose ball.
+- **AI uses the identical mechanic**: the designated presser lunges once it
+  closes to ~1.6 m of an opponent carrier, so human and CPU tackles behave the
+  same way.
+- Hitting the ball (or an opponent) during the lunge has no extra cooldown or
+  wind-up; the trade-off is that you commit to the burst and can be beaten by a
+  well-timed direction change.
 
 ## HUD notes
 

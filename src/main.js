@@ -5,9 +5,9 @@ import { createControllers } from './controllers.js';
 /* =====================================================================
    MINI FOOTBALL 3D  -  2 vs 2
    Keyboard: WASD / Arrows move, Shift sprint, Space shoot (hold to charge),
-             Q / E / Tab switch player, R restart
+             F tackle, Q / E / Tab switch player, R restart
    Gamepad:  Left stick / D-pad move, RT sprint, X shoot (hold to charge),
-             LB switch player, A / Start kick off, Start restart
+             B tackle, LB switch player, A / Start kick off, Start restart
    ===================================================================== */
 
 /* ---------- Config ---------- */
@@ -33,6 +33,13 @@ const POSSESS_LOCK = 0.3; // seconds a stripped player cannot re-grab
 const POSSESS_DELAY = 0.15; // ball stays loose this long after a tackle
 const POSSESS_MAX_V = 14; // too fast to trap — shots zip past instead of gluing
 const POP_SPEED = 7; // loose-ball speed when a tackle wins the ball
+// tackling — a short lunge with a ball-seeking homing pull
+const TACKLE_TIME = 0.26; // lunge duration (the "magnetised" window)
+const TACKLE_CD = 0.75; // seconds before you can lunge again
+const TACKLE_SPEED = 13.5; // lunge speed (vs 10.5 sprint)
+const TACKLE_MAGNET_R = 2.4; // how far the ball pulls you in while lunging
+const TACKLE_RANGE = PLAYER_R * 2.2; // dispossess reach while lunging (~1.21 m)
+const TACKLE_KNOCK = 8; // shove velocity applied to the dispossessed opponent
 const MATCH_TIME = 120; // seconds
 const GRAVITY = 24;
 const STEP = 1 / 120; // fixed physics step
@@ -446,6 +453,8 @@ function createPlayer(team) {
     lostCd: 0,
     sprinting: false,
     kickAnim: 0,
+    tackle: 0,
+    tackleCd: 0,
     aiTimer: 0,
     aiAimZ: rand(-2.5, 2.5),
   };
@@ -545,9 +554,9 @@ hud.innerHTML = `
   </div>
   <div id="help">
     <span id="helpKb"><kbd>WASD</kbd> / <kbd>Arrows</kbd> move &nbsp; <kbd>Shift</kbd> sprint<br>
-    <kbd>Space</kbd> shoot (hold to charge) &nbsp; <kbd>Q</kbd> / <kbd>Tab</kbd> switch player</span><span
+    <kbd>Space</kbd> shoot (hold to charge) &nbsp; <kbd>F</kbd> tackle &nbsp; <kbd>Q</kbd> / <kbd>Tab</kbd> switch player</span><span
     id="helpPad" style="display:none"><br><kbd>Stick</kbd> / <kbd>D-pad</kbd> move &nbsp; <kbd>RT</kbd> sprint<br>
-    <kbd>X</kbd> shoot (hold to charge) &nbsp; <kbd>LB</kbd> switch &nbsp; <kbd>Start</kbd> restart</span>
+    <kbd>X</kbd> shoot (hold to charge) &nbsp; <kbd>B</kbd> tackle &nbsp; <kbd>LB</kbd> switch &nbsp; <kbd>Start</kbd> restart</span>
   </div>
   <div id="toast"></div>
 `;
@@ -563,6 +572,7 @@ overlay.innerHTML = `
       <kbd>WASD</kbd> / <kbd>Arrows</kbd> &ndash; move<br>
       <kbd>Shift</kbd> &ndash; sprint<br>
       <kbd>Space</kbd> &ndash; shoot (hold for power)<br>
+      <kbd>F</kbd> &ndash; tackle (lunge into the ball)<br>
       <kbd>Q</kbd> / <kbd>Tab</kbd> &ndash; switch player<br>
       <kbd>R</kbd> &ndash; restart match
     </div>
@@ -616,6 +626,8 @@ function resetKickoff() {
     p.kickCd = 0;
     p.lostCd = 0;
     p.sprinting = false;
+    p.tackle = 0;
+    p.tackleCd = 0;
   });
   teams.red.players.forEach((p, i) => {
     p.group.position.set(-spots[i][0], 0, -spots[i][1]);
@@ -624,6 +636,8 @@ function resetKickoff() {
     p.kickCd = 0;
     p.lostCd = 0;
     p.sprinting = false;
+    p.tackle = 0;
+    p.tackleCd = 0;
   });
   ball.pos.set(0, BALL_R, 0);
   ball.vel.set(0, 0, 0);
@@ -703,6 +717,7 @@ const controllers = createControllers({
   distToBall,
   assistAim,
   kickBall,
+  doTackle: (p) => startTackle(p),
 });
 
 function applyMode(next) {
@@ -755,12 +770,19 @@ window.addEventListener('keydown', (e) => {
     if (state === 'playing' || state === 'kickoff') controllers.switchPlayer(controllers.slots[0]);
   } else if (e.code === 'Space') {
     controllers.startCharge(controllers.slots[0]);
+  } else if (e.code === 'KeyF') {
+    controllers.startTackle(controllers.slots[0]);
   }
 });
 
 window.addEventListener('keyup', (e) => {
   keys.delete(e.code);
   if (e.code === 'Space') controllers.release(controllers.slots[0]);
+});
+
+// a click also lunges the driven player (slot 0)
+window.addEventListener('mousedown', (e) => {
+  if (e.button === 0 && state === 'playing') controllers.startTackle(controllers.slots[0]);
 });
 
 window.addEventListener('blur', () => {
@@ -780,6 +802,67 @@ function kickBall(p, dirX, dirZ, power) {
   ball.vel.y = Math.max(0, power - 0.3) * 11;
   p.kickCd = 0.35;
   p.kickAnim = 0.25;
+}
+
+/* ---------- Tackling ---------- */
+// press a button to lunge: a short dash faster than sprint that homes toward
+// the ball ("magnetised"), so you connect with the ball/opponent and win
+// possession quickly instead of just skating past.
+function startTackle(p) {
+  if (state !== 'playing' || p.tackle > 0 || p.tackleCd > 0) return;
+  const v = p.vel;
+  const sp = Math.hypot(v.x, v.z);
+  // launch face-first down your movement direction (or current facing)
+  p.heading = sp > 0.5 ? Math.atan2(v.x, v.z) : p.heading;
+  p.tackle = TACKLE_TIME;
+  p.tackleCd = TACKLE_CD;
+  p.sprinting = true;
+}
+
+// one fixed step of the lunge + homing pull
+function updateTackleMove(p, dt) {
+  p.tackle -= dt;
+  const pos = p.group.position;
+  let dx = Math.sin(p.heading);
+  let dz = Math.cos(p.heading);
+
+  // magnet: while lunging, bend your run toward the ball so a pass can't
+  // be dodged by moving half a metre — you arrive and it still connects
+  const bdx = ball.pos.x - pos.x;
+  const bdz = ball.pos.z - pos.z;
+  const bd = Math.hypot(bdx, bdz);
+  if (bd < TACKLE_MAGNET_R && bd > 0.001) {
+    const nose = dx * bdx + dz * bdz; // is the ball ahead of you?
+    if (nose > -0.3 * bd) {
+      const tx = bdx + ball.vel.x * 0.12; // small lead on a moving ball
+      const tz = bdz + ball.vel.z * 0.12;
+      const tl = Math.hypot(tx, tz) || 1;
+      dx = tx / tl;
+      dz = tz / tl;
+    }
+  }
+
+  const speed = TACKLE_SPEED;
+  p.vel.x = dx * speed;
+  p.vel.z = dz * speed;
+  pos.x += p.vel.x * dt;
+  pos.z += p.vel.z * dt;
+  pos.x = clamp(pos.x, -HALF_L + 0.3, HALF_L - 0.3);
+  pos.z = clamp(pos.z, -HALF_W + PLAYER_R, HALF_W - PLAYER_R);
+  p.heading = lerpAngle(p.heading, Math.atan2(dx, dz), Math.min(1, 20 * dt));
+}
+
+// a successful tackle shoves the dispossessed opponent aside
+function tackleShove(tackler, victim) {
+  const tp = tackler.group.position;
+  const vp = victim.group.position;
+  let dx = vp.x - tp.x;
+  let dz = vp.z - tp.z;
+  const dl = Math.hypot(dx, dz) || 1;
+  dx /= dl;
+  dz /= dl;
+  victim.vel.x += dx * TACKLE_KNOCK;
+  victim.vel.z += dz * TACKLE_KNOCK;
 }
 
 /* ---------- Possession ---------- */
@@ -918,6 +1001,10 @@ function updateAI(p, team, dt) {
     tz = owner.group.position.z + owner.vel.z * 0.15;
     speed = AI_SPRINT;
     p.aiTimer = 0;
+
+    // lunge once the carrier is in range — the homing magnet does the rest
+    const td = Math.hypot(tx - pos.x, tz - pos.z);
+    if (td < 1.6 && p.tackleCd <= 0 && Math.random() < 0.3) startTackle(p);
   } else if (team.presser === p && !owner) {
     // chase a loose ball
     const bx = bp.x + ball.vel.x * 0.25;
@@ -1170,6 +1257,7 @@ function simulate(dt) {
   for (const p of players) {
     p.kickCd = Math.max(0, p.kickCd - dt);
     p.lostCd = Math.max(0, p.lostCd - dt);
+    p.tackleCd = Math.max(0, p.tackleCd - dt);
   }
   ball.looseCd = Math.max(0, ball.looseCd - dt);
 
@@ -1185,12 +1273,16 @@ function simulate(dt) {
     for (const p of team.players) {
       if (!live) {
         p.sprinting = false;
+        p.tackle = 0;
         steer(p, 0, 0, 0, dt);
         continue;
       }
       const slot = controllers.slotFor(p);
       const input = slot && controllers.isPlayable(slot) ? controllers.inputFor(slot) : null;
-      if (!input) {
+      if (p.tackle > 0) {
+        // a lunge overrides normal steering so neither stick nor AI can direct it
+        updateTackleMove(p, dt);
+      } else if (!input) {
         updateAI(p, team, dt);
       } else {
         p.sprinting = input.sprint;
@@ -1199,7 +1291,8 @@ function simulate(dt) {
     }
   }
 
-  // body check: an opponent crashing into the carrier knocks the ball loose
+  // body check: an opponent crashing into the carrier knocks the ball loose.
+  // a lunging tackle reaches further and bulldozes the carrier aside
   const carrier = ball.owner;
   if (carrier && ball.pos.y < 1.2) {
     for (const pl of players) {
@@ -1207,8 +1300,10 @@ function simulate(dt) {
       const a = carrier.group.position;
       const b = pl.group.position;
       const d = Math.hypot(b.x - a.x, b.z - a.z);
-      if (d < PLAYER_R * 1.9 && d > 0.0001) {
+      const reach = pl.tackle > 0 ? TACKLE_RANGE : PLAYER_R * 1.9;
+      if (d < reach && d > 0.0001) {
         dispossess(carrier, pl);
+        if (pl.tackle > 0) tackleShove(pl, carrier);
         break;
       }
     }
@@ -1294,6 +1389,15 @@ function animatePlayers(dt, time) {
     if (p.kickAnim > 0) {
       p.kickAnim -= dt;
       p.legs[0].rotation.x = -1.4 * Math.sin((1 - Math.max(0, p.kickAnim) / 0.25) * Math.PI);
+    }
+
+    if (p.tackle > 0) {
+      // lunge pose: shoulder into it, braced, arms driving forward
+      p.arms[0].rotation.x = -2.6;
+      p.arms[1].rotation.x = -2.6;
+      g.rotation.x = -0.3;
+    } else {
+      g.rotation.x = 0;
     }
 
     if (state === 'goal' && p.team === lastScorer) {
