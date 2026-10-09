@@ -2,8 +2,9 @@
    poll() once per frame; snapshots expose held state + press/release edges. */
 
 export const MAP = {
-  shoot: 2, // X (Xbox) / Square (PS)
-  tackle: 1, // B (Xbox) / Circle (PS)
+  pass: 2, // X (Xbox) / Square (PS)
+  shoot: 1, // B (Xbox) / Circle (PS)
+  tackle: 3, // Y (Xbox) / Triangle (PS)
   switchPrev: 4, // LB / L1
   switchNext: 5, // RB / R1
   confirm: 0, // A / Cross

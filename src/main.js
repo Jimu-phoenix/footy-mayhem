@@ -5,9 +5,9 @@ import { createControllers } from './controllers.js';
 /* =====================================================================
    MINI FOOTBALL 3D  -  2 vs 2
    Keyboard: WASD / Arrows move, Shift sprint, Space shoot (hold to charge),
-             F tackle, Q / E / Tab switch player, R restart
-   Gamepad:  Left stick / D-pad move, RT sprint, X shoot (hold to charge),
-             B tackle, LB switch player, A / Start kick off, Start restart
+             X pass, F tackle, Q / E / Tab switch player, R restart
+   Gamepad:  Left stick / D-pad move, RT sprint, B shoot (hold to charge),
+             X pass, Y tackle, LB switch player, A / Start kick off, Start restart
    ===================================================================== */
 
 /* ---------- Config ---------- */
@@ -40,9 +40,20 @@ const TACKLE_SPEED = 13.5; // lunge speed (vs 10.5 sprint)
 const TACKLE_MAGNET_R = 2.4; // how far the ball pulls you in while lunging
 const TACKLE_RANGE = PLAYER_R * 2.2; // dispossess reach while lunging (~1.21 m)
 const TACKLE_KNOCK = 8; // shove velocity applied to the dispossessed opponent
+// passing — a crisp ball to your teammate, who you then auto-control
+const PASS_LEAD_MAX = 12; // max lead aimed ahead of the receiver (pitch-clamped)
+const PASS_SPEED_MIN = 11; // shortest/quick taps stay crisp
+const PASS_SPEED_EXTRA = 5; // extra launch speed so the ball covers `dist` (friction!)
+const PASS_SPEED_MAX = 28; // longest pass can cross most of the pitch
+const RECEIVE_R = 1.5; // radius at which the marked receiver traps (vs 1.0 loose)
 const MATCH_TIME = 120; // seconds
 const GRAVITY = 24;
 const STEP = 1 / 120; // fixed physics step
+
+// rolling drag (v' = -BALL_ROLL_K*v - BALL_ROLL_C); passed balls & shots die
+// down under this, and flightTime() uses the same coefficients to aim leads
+const BALL_ROLL_K = 0.9;
+const BALL_ROLL_C = 2.0;
 
 const HUMAN_SPEED = 7.5;
 const HUMAN_SPRINT = 10.5;
@@ -376,6 +387,7 @@ const ball = {
   ),
   vel: new THREE.Vector3(),
   owner: null, // player currently dribbling the ball
+  receiver: null, // player a pass is aimed at (AI teammates stand off)
   looseCd: 0, // ball cannot be picked up until this expires (after a tackle)
 };
 ball.mesh.castShadow = true;
@@ -491,8 +503,9 @@ const markers = [makeMarker('#ffe14a'), makeMarker('#7CFC00')];
 const style = document.createElement('style');
 style.textContent = `
   html, body { margin: 0; height: 100%; overflow: hidden; background: #000; font-family: 'Segoe UI', system-ui, sans-serif; }
-  canvas { display: block; }
-  #hud { position: fixed; inset: 0; pointer-events: none; color: #fff; user-select: none; }
+  #app { display: none; } /* kill the Vite template skeleton block that pushed the canvas off-screen */
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; }
+  #hud { position: fixed; inset: 0; z-index: 10; pointer-events: none; color: #fff; user-select: none; }
   #scoreboard { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); display: flex; align-items: stretch;
     border-radius: 12px; overflow: hidden; font-weight: 800; box-shadow: 0 6px 20px rgba(0,0,0,.35); }
   #scoreboard > div { padding: 8px 16px; display: flex; align-items: center; }
@@ -517,7 +530,7 @@ style.textContent = `
   #help { position: absolute; left: 14px; bottom: 12px; font-size: 12px; opacity: .85; line-height: 1.6;
     background: rgba(0,0,0,.35); padding: 8px 12px; border-radius: 8px; }
   kbd { background: rgba(255,255,255,.2); border-radius: 4px; padding: 1px 6px; font-family: inherit; font-weight: 700; }
-  #overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: auto;
+  #overlay { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; pointer-events: auto;
     background: radial-gradient(ellipse at center, rgba(8,18,40,.55), rgba(8,18,40,.88)); color: #fff; }
   #overlay.hidden { display: none; }
   .card { text-align: center; padding: 32px 40px; max-width: 460px; }
@@ -554,9 +567,9 @@ hud.innerHTML = `
   </div>
   <div id="help">
     <span id="helpKb"><kbd>WASD</kbd> / <kbd>Arrows</kbd> move &nbsp; <kbd>Shift</kbd> sprint<br>
-    <kbd>Space</kbd> shoot (hold to charge) &nbsp; <kbd>F</kbd> tackle &nbsp; <kbd>Q</kbd> / <kbd>Tab</kbd> switch player</span><span
+    <kbd>Space</kbd> shoot &nbsp; <kbd>X</kbd> pass &nbsp; <kbd>F</kbd> tackle &nbsp; <kbd>Q</kbd> / <kbd>Tab</kbd> switch</span><span
     id="helpPad" style="display:none"><br><kbd>Stick</kbd> / <kbd>D-pad</kbd> move &nbsp; <kbd>RT</kbd> sprint<br>
-    <kbd>X</kbd> shoot (hold to charge) &nbsp; <kbd>B</kbd> tackle &nbsp; <kbd>LB</kbd> switch &nbsp; <kbd>Start</kbd> restart</span>
+    <kbd>X</kbd> pass &nbsp; <kbd>B</kbd> shoot &nbsp; <kbd>Y</kbd> tackle &nbsp; <kbd>LB</kbd> switch &nbsp; <kbd>Start</kbd> restart</span>
   </div>
   <div id="toast"></div>
 `;
@@ -572,6 +585,7 @@ overlay.innerHTML = `
       <kbd>WASD</kbd> / <kbd>Arrows</kbd> &ndash; move<br>
       <kbd>Shift</kbd> &ndash; sprint<br>
       <kbd>Space</kbd> &ndash; shoot (hold for power)<br>
+      <kbd>X</kbd> &ndash; pass (auto-switches to the receiver)<br>
       <kbd>F</kbd> &ndash; tackle (lunge into the ball)<br>
       <kbd>Q</kbd> / <kbd>Tab</kbd> &ndash; switch player<br>
       <kbd>R</kbd> &ndash; restart match
@@ -642,6 +656,7 @@ function resetKickoff() {
   ball.pos.set(0, BALL_R, 0);
   ball.vel.set(0, 0, 0);
   ball.owner = null;
+  ball.receiver = null;
   ball.looseCd = 0;
   teams.blue.presser = null;
   teams.red.presser = null;
@@ -718,6 +733,7 @@ const controllers = createControllers({
   assistAim,
   kickBall,
   doTackle: (p) => startTackle(p),
+  doPass,
 });
 
 function applyMode(next) {
@@ -772,6 +788,8 @@ window.addEventListener('keydown', (e) => {
     controllers.startCharge(controllers.slots[0]);
   } else if (e.code === 'KeyF') {
     controllers.startTackle(controllers.slots[0]);
+  } else if (e.code === 'KeyX') {
+    controllers.pass(controllers.slots[0]);
   }
 });
 
@@ -795,6 +813,7 @@ $startBtn.addEventListener('click', startMatch);
 /* ---------- Kicking ---------- */
 function kickBall(p, dirX, dirZ, power) {
   ball.owner = null;
+  ball.receiver = null;
   const len = Math.hypot(dirX, dirZ) || 1;
   const speed = 9 + power * 23;
   ball.vel.x = (dirX / len) * speed;
@@ -802,6 +821,62 @@ function kickBall(p, dirX, dirZ, power) {
   ball.vel.y = Math.max(0, power - 0.3) * 11;
   p.kickCd = 0.35;
   p.kickAnim = 0.25;
+}
+
+/* ---------- Passing ---------- */
+// flat ball to your teammate, led to where they are running. Returns the
+// receiver (so the controller layer can auto-take control of them).
+function doPass(p) {
+  if (ball.owner !== p || p.kickCd > 0) return null;
+  const team = teams[p.team];
+  const mate = team.players.find((q) => q !== p);
+  if (!mate) return null;
+
+  const mp = mate.group.position;
+  const mv = mate.vel;
+  const d0 = Math.hypot(mp.x - ball.pos.x, mp.z - ball.pos.z);
+  const v0 = clamp(d0 + PASS_SPEED_EXTRA, PASS_SPEED_MIN, PASS_SPEED_MAX);
+  // lead = receiver speed x their true travel time under rolling friction
+  const t = flightTime(d0, v0);
+  const tx = clamp(mp.x + clamp(mv.x * t, -PASS_LEAD_MAX, PASS_LEAD_MAX), -HALF_L + 0.3, HALF_L - 0.3);
+  const tz = clamp(mp.z + clamp(mv.z * t, -PASS_LEAD_MAX, PASS_LEAD_MAX), -HALF_W + PLAYER_R, HALF_W - PLAYER_R);
+
+  let dx = tx - ball.pos.x;
+  let dz = tz - ball.pos.z;
+  const dist = Math.hypot(dx, dz);
+  if (dist < 0.6) {
+    // teammate is right on top of us: nudge the ball forward as a lay-off
+    dx = Math.sin(p.heading);
+    dz = Math.cos(p.heading);
+  } else {
+    dx /= dist;
+    dz /= dist;
+  }
+  const speed = clamp(dist + PASS_SPEED_EXTRA, PASS_SPEED_MIN, PASS_SPEED_MAX);
+
+  ball.owner = null;
+  ball.receiver = mate;
+  ball.vel.set(dx * speed, 0, dz * speed);
+  p.kickCd = 0.35;
+  p.kickAnim = 0.25;
+  p.lostCd = Math.max(p.lostCd, 0.25); // passer can't instantly re-grab
+  return mate;
+}
+
+// time (s) a ball launched at v0 needs to cover `dist` while rolling under
+// the same drag the physics use (v' = -K*v - C). Newton root of the motion.
+function flightTime(dist, v0) {
+  const K = BALL_ROLL_K;
+  const C = BALL_ROLL_C / K;
+  let t = Math.max(0.01, dist / v0);
+  for (let i = 0; i < 8; i++) {
+    const A = (v0 + C) / K;
+    const f = A * (1 - Math.exp(-K * t)) - C * t - dist;
+    const fp = A * K * Math.exp(-K * t) - C;
+    if (!Number.isFinite(fp) || Math.abs(fp) < 1e-9) break;
+    t -= f / fp;
+  }
+  return Math.max(0.001, t);
 }
 
 /* ---------- Tackling ---------- */
@@ -901,6 +976,14 @@ function dispossess(carrier, tackler) {
 // nearest eligible player picks up a loose ball
 function tryPossess() {
   if (ball.owner || ball.looseCd > 0 || ball.pos.y > 1.0) return;
+  // the marked pass receiver has first claim at a generous radius, even on a
+  // ball still moving faster than anyone can normally trap
+  const r = ball.receiver;
+  if (r && r.lostCd <= 0 && r.kickCd <= 0 && distToBall(r) < RECEIVE_R) {
+    ball.owner = r;
+    ball.receiver = null;
+    return;
+  }
   if (Math.hypot(ball.vel.x, ball.vel.z) > POSSESS_MAX_V) return;
   let best = null;
   let bd = POSSESS_R;
@@ -912,7 +995,10 @@ function tryPossess() {
       best = pl;
     }
   }
-  if (best) ball.owner = best;
+  if (best) {
+    ball.owner = best;
+    ball.receiver = null;
+  }
 }
 
 function distToBall(p) {
@@ -1006,6 +1092,14 @@ function updateAI(p, team, dt) {
     const td = Math.hypot(tx - pos.x, tz - pos.z);
     if (td < 1.6 && p.tackleCd <= 0 && Math.random() < 0.3) startTackle(p);
   } else if (team.presser === p && !owner) {
+    const letMateTake = ball.receiver && ball.receiver !== p && ball.receiver.team === team.name;
+    if (letMateTake) {
+      // a pass is aimed at our teammate (likely the human): drift to support
+      // and don't dive in and steal it off their feet
+      tx = ownX * 0.65 + pos.x * 0.35;
+      tz = clamp(pos.z * 0.5, -8, 8);
+      speed = AI_SPEED;
+    } else {
     // chase a loose ball
     const bx = bp.x + ball.vel.x * 0.25;
     const bz = bp.z + ball.vel.z * 0.25;
@@ -1046,6 +1140,7 @@ function updateAI(p, team, dt) {
       }
     } else {
       p.aiTimer = 0;
+    }
     }
   } else {
     // support / cover: teammate has the ball, or ball is loose elsewhere
@@ -1114,7 +1209,7 @@ function stepBall(dt) {
     const onGround = p.y <= BALL_R + 0.01 && v.y === 0;
     const speed = Math.hypot(v.x, v.z);
     if (onGround && speed > 0) {
-      const ns = Math.max(0, speed * Math.exp(-0.9 * dt) - 2.0 * dt);
+      const ns = Math.max(0, speed * Math.exp(-BALL_ROLL_K * dt) - BALL_ROLL_C * dt);
       const k = ns / speed;
       v.x *= k;
       v.z *= k;

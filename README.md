@@ -60,6 +60,7 @@ connected):
 | Move | `WASD` / `Arrows` |
 | Sprint | `Shift` |
 | Shoot (hold to charge) | `Space` |
+| Pass | `X` |
 | Tackle | `F` |
 | Switch player | `Q` / `E` / `Tab` |
 | Kick off / restart | `Enter` / `R` |
@@ -70,8 +71,9 @@ connected):
 |---|---|
 | Move | Left stick / D-pad |
 | Sprint | `RT` (R2) |
-| Shoot (hold to charge) | `X` (Xbox) / `□` (PS) — hold, release to kick |
-| Tackle | `B` (Xbox) / `○` (PS) |
+| Shoot (hold to charge) | `B` (Xbox) / `○` (PS) — hold, release to kick |
+| Pass | `X` (Xbox) / `□` (PS) |
+| Tackle | `Y` (Xbox) / `△` (PS) |
 | Switch player | `LB` (L1) |
 | Kick off / continue | `A` (Cross) or `Start` |
 | Restart match | `Start` (Options) |
@@ -104,7 +106,7 @@ Tuning knobs live with the other constants at the top of `src/main.js`.
 
 ## Tackling
 
-Press the tackle button (`F` / `B` / click) for a **lunge**: a 0.26 s dash that
+Press the tackle button (`F` / `Y` / click) for a **lunge**: a 0.26 s dash that
 outruns sprinting and, while active, **homing-pulls you onto the ball** — so a
 nearby ball or opponent carrier can't be dodged by drifting half a metre.
 
@@ -125,6 +127,33 @@ nearby ball or opponent carrier can't be dodged by drifting half a metre.
 - Hitting the ball (or an opponent) during the lunge has no extra cooldown or
   wind-up; the trade-off is that you commit to the burst and can be beaten by a
   well-timed direction change.
+
+## Passing
+
+With the ball, press **pass** (`X` key / `X` button): you lay a flat ball to your
+teammate, and **control switches to them automatically** so you can run onto it.
+
+- **Target**: your teammate, aimed at a lead point that accounts for the ball's
+  real travel time under rolling drag — the receiver's velocity × `flightTime`
+  (a Newton root of `v' = −0.9v − 2`), capped at `PASS_LEAD_MAX` 12 m and
+  pitch-clamped. A sprinting run gets played into space, a standing mate gets it
+  to feet.
+- **Weight**: launch speed = aimed length + `PASS_SPEED_EXTRA` (5), clamped
+  11–28 m/s. The extra compensates for the heavy ball — passes arrive at the
+  receiver with a little pace left instead of dying 5 m short.
+- **Receiving**: the passed-to player is marked as `ball.receiver` and traps it
+  at a generous `RECEIVE_R` 1.5 m **regardless of ball speed**. Opponents get
+  no such courtesy — they must physically block the pass line or win the
+  contact on the carrier.
+- **Auto-switch**: control of your slot moves to the recipient the instant you
+  pass. In **Co-op** the switch is skipped if the teammate is already driven by
+  the second controller; solo and versus always switch.
+- **Your AI stands off**: your own (AI) teammate drifts to support instead of
+  diving in and stealing the ball off your feet. The opponent AI still contests
+  the pass normally.
+- The passer is re-locked out of possession for 0.25 s so an accidental lay-off
+  can't be instantly re-glued, and passing has the same 0.35 s kick cooldown as
+  shooting.
 
 ## HUD notes
 

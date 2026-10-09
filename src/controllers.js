@@ -138,6 +138,19 @@ export function createControllers(deps) {
     slot.player = other;
   }
 
+  function pass(slot) {
+    if (!isPlayable(slot)) return;
+    const team = deps.teams[slot.team];
+    const p = team.players[slot.player];
+    const receiver = deps.doPass(p); // null if not in possession / not possible
+    if (!receiver) return;
+    const rIdx = team.players.findIndex((q) => q === receiver);
+    if (rIdx < 0) return;
+    const taken = slots.some((s2) => s2 !== slot && s2.team === slot.team && s2.player === rIdx);
+    if (taken) return; // receiver already driven by another controller
+    slot.player = rIdx;
+  }
+
   function updatePads() {
     for (const s of slots) {
       if (s.padIndex == null) continue;
@@ -147,6 +160,7 @@ export function createControllers(deps) {
 
       if (pad.justPressed.includes(MAP.shoot)) startCharge(s);
       if (pad.justReleased.includes(MAP.shoot)) release(s);
+      if (pad.justPressed.includes(MAP.pass)) pass(s);
       if (pad.justPressed.includes(MAP.tackle)) startTackle(s);
       if (pad.justPressed.includes(MAP.switchPrev) || pad.justPressed.includes(MAP.switchNext)) switchPlayer(s);
       if (pad.justPressed.includes(MAP.confirm) && (state === 'menu' || state === 'ended')) deps.startMatch();
@@ -168,6 +182,7 @@ export function createControllers(deps) {
     resetCharges,
     switchPlayer,
     startTackle,
+    pass,
     updatePads,
   };
 }
