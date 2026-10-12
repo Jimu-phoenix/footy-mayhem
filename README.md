@@ -32,7 +32,10 @@ built-in browser [Gamepad API](https://developer.mozilla.org/en-US/docs/Web/API/
 | `src/main.js` | Scene, pitch, players, ball physics, AI, match state machine, HUD |
 | `src/gamepad.js` | **New** — Gamepad API wrapper: per-frame polling, radial deadzone, D-pad as stick, press/release edge detection, connect/disconnect events |
 | `src/controllers.js` | **New** — controller *slots*: binds one input source (keyboard + pad) to one player, per-slot shot charge/release, player switching, pad rebinding |
-| `src/counter.js`, `src/style.css`, `src/assets/` | Unused leftovers from the Vite template |
+| `src/character.js` | **New** — low-poly `createCharacter()` humanoid with a speed-blended walk cycle; exposes `legs`/`arms`/`body` pivots for the game's kick/lunge/celebration poses |
+| `src/audio.js` | **New** — tiny Web Audio engine: overlapping kick hits, a looping crowd bed, and a referee whistle |
+| `src/assets/audio/` | **New** — `kick.ogg` + `whistle.ogg` (CC0, BigSoundBank) and `crowd.mp3` + `cheer.mp3` (live-stadium crowd, Mixkit) |
+| `src/counter.js`, `src/style.css` | Unused leftovers from the Vite template |
 
 ## Game modes
 
@@ -154,6 +157,45 @@ teammate, and **control switches to them automatically** so you can run onto it.
 - The passer is re-locked out of possession for 0.25 s so an accidental lay-off
   can't be instantly re-glued, and passing has the same 0.35 s kick cooldown as
   shooting.
+- **Reception assist**: the first moment an incoming pass gets within
+  `RECEIVE_ATTRACT_R` 2.4 m of the marked receiver, the receiver is gently eased
+  toward the ball for a very short `RECEIVE_ATTRACT_TIME` 0.3 s window (eased at
+  up to `RECEIVE_ATTRACT_PULL` 7 m/s, clamped so it never overshoots the ball).
+  It engages once per pass, so it makes catching easier without feeling magnetic.
+
+## Characters & weather
+
+- Players are low-poly humanoids built by `createCharacter()` in
+  `src/character.js` (flat-shaded, feet at y = 0, facing +Z). The game drives the
+  built-in walk cycle via `speed` and still layers its own kick, tackle-lunge and
+  goal-celebration poses on the exposed limb pivots.
+- **Weather is randomised at every kick-off** (`setWeather(randomWeather())`),
+  picking one of `sunny`, `cloudy` or `night`. Each is a full hue/light grade of
+  the scene:
+  - **Sunny** — bright blue sky, warm white sun, high exposure.
+  - **Cloudy** — grey sky, tighter fog, soft diffuse light.
+  - **Night** — deep navy sky, dim blue moonlight, low ambient.
+- A toast announces the weather when the match starts.
+
+## Audio
+
+Sound is handled by `src/audio.js` with the Web Audio API (no libraries), using
+clips bundled in `src/assets/audio/`:
+
+- `kick.ogg` — a single crisp hit, played **only when a shot or a pass is made**
+  (never on tackles or loose-ball contact), with volume scaled by shot power. No
+  random pitch, so every strike sounds the same.
+- `crowd.mp3` — a looping **live stadium crowd** (chanting) bed, faded in for
+  kick-off/play and swelled briefly while a goal is shown (`updateFans()`).
+- `cheer.mp3` — a one-shot stadium roar played the instant a goal is scored.
+- `whistle.ogg` — referee whistle at kick-off and full time.
+
+Sources: `kick.ogg` and `whistle.ogg` are **CC0** from
+[BigSoundBank](https://bigsoundbank.com); `crowd.mp3` and `cheer.mp3` are from
+[Mixkit](https://mixkit.co) under the Mixkit Free License.
+
+Browsers block audio until the user interacts, so the context is created on the
+first click/keypress (`unlockAudio()`) and all playback no-ops until then.
 
 ## HUD notes
 

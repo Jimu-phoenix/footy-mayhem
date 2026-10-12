@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { poll as pollGamepads, onPadChange, padCount } from './gamepad.js';
 import { createControllers } from './controllers.js';
+import { createCharacter } from './character.js';
+import { unlockAudio, playKick, playWhistle, playCheer, setFans } from './audio.js';
 
 /* =====================================================================
    MINI FOOTBALL 3D  -  2 vs 2
@@ -46,6 +48,10 @@ const PASS_SPEED_MIN = 11; // shortest/quick taps stay crisp
 const PASS_SPEED_EXTRA = 5; // extra launch speed so the ball covers `dist` (friction!)
 const PASS_SPEED_MAX = 28; // longest pass can cross most of the pitch
 const RECEIVE_R = 1.5; // radius at which the marked receiver traps (vs 1.0 loose)
+// reception assist — once a pass gets close, the receiver is briefly pulled in
+const RECEIVE_ATTRACT_R = 2.4; // the assist engages when the ball is this close
+const RECEIVE_ATTRACT_TIME = 0.3; // how long the pull lasts once engaged (seconds)
+const RECEIVE_ATTRACT_PULL = 7.0; // easing speed toward the ball while engaged (m/s)
 const MATCH_TIME = 120; // seconds
 const GRAVITY = 24;
 const STEP = 1 / 120; // fixed physics step
@@ -80,10 +86,12 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
+renderer.toneMapping = THREE.ACESFilmicToneMapping; // lets weather grade the exposure
 document.body.appendChild(renderer.domElement);
 
 /* ---------- Lights ---------- */
-scene.add(new THREE.HemisphereLight('#ffffff', '#3a6b35', 1.0));
+const hemi = new THREE.HemisphereLight('#ffffff', '#3a6b35', 1.0);
+scene.add(hemi);
 
 const sun = new THREE.DirectionalLight('#ffffff', 2.2);
 sun.position.set(15, 32, 12);
@@ -97,6 +105,96 @@ sun.shadow.camera.near = 1;
 sun.shadow.camera.far = 90;
 sun.shadow.bias = -0.0005;
 scene.add(sun);
+
+/* ---------- Stadium floodlights (only lit at night) ---------- */
+const floodlights = [];
+{
+  const lampMat = new THREE.MeshBasicMaterial({ color: '#f2f6ff' });
+  const poleMat = new THREE.MeshStandardMaterial({ color: '#2a2f39', roughness: 0.7 });
+  // [lamp x, y, z,  target x, z] — four masts, each pooling light on a quadrant
+  const masts = [
+    [22, 24, 15, -12, -8],
+    [22, 24, -15, -12, 8],
+    [-22, 24, 15, 12, -8],
+    [-22, 24, -15, 12, 8],
+  ];
+  for (const [x, y, z, tx, tz] of masts) {
+    const target = new THREE.Object3D();
+    target.position.set(tx, 0, tz);
+    scene.add(target);
+
+    const spot = new THREE.SpotLight('#eaf2ff', 0, 130, 0.7, 0.5, 0);
+    spot.position.set(x, y, z);
+    spot.target = target;
+    spot.castShadow = false; // sun already shadows; keep the night cheap
+    scene.add(spot);
+
+    const head = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.55, 0.8), lampMat);
+    head.position.set(x, y, z);
+    scene.add(head);
+
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.18, y, 8), poleMat);
+    pole.position.set(x, y / 2, z);
+    scene.add(pole);
+
+    floodlights.push({ spot, head, pole });
+  }
+}
+
+/* ---------- Weather (random each match) ---------- */
+// Each weather is a hue/light grade: sky + fog colour, hemisphere tint and the
+// sun (or moon) colour/intensity. Applied to the whole scene for a clear mood.
+const WEATHERS = {
+  sunny: {
+    label: 'SUNNY', sky: '#8ec9ff', fogNear: 75, fogFar: 170,
+    hemiSky: '#ffffff', hemiGround: '#3a6b35', hemi: 1.0,
+    sunColor: '#fff6e0', sun: 2.2, exposure: 1.0, flood: 0,
+  },
+  cloudy: {
+    label: 'CLOUDY', sky: '#9aa6b2', fogNear: 40, fogFar: 130,
+    hemiSky: '#c9d2da', hemiGround: '#48584a', hemi: 0.9,
+    sunColor: '#dbe3ec', sun: 0.9, exposure: 0.95, flood: 0,
+  },
+  night: {
+    label: 'NIGHT', sky: '#0a1024', fogNear: 30, fogFar: 115,
+    hemiSky: '#2b3c6e', hemiGround: '#0a1309', hemi: 0.35,
+    sunColor: '#8fa6ff', sun: 0.5, exposure: 1.05, flood: 3.4,
+  },
+};
+let weather = 'sunny';
+
+function setWeather(name) {
+  const w = WEATHERS[name] || WEATHERS.sunny;
+  weather = WEATHERS[name] ? name : 'sunny';
+
+  const sky = new THREE.Color(w.sky);
+  scene.background = sky;
+  scene.fog.color.copy(sky);
+  scene.fog.near = w.fogNear;
+  scene.fog.far = w.fogFar;
+
+  hemi.color.set(w.hemiSky);
+  hemi.groundColor.set(w.hemiGround);
+  hemi.intensity = w.hemi;
+
+  sun.color.set(w.sunColor);
+  sun.intensity = w.sun;
+
+  // stadium floodlights + their masts only exist under the lights (night)
+  const floodsOn = w.flood > 0;
+  for (const f of floodlights) {
+    f.spot.intensity = w.flood;
+    f.head.visible = floodsOn;
+    f.pole.visible = floodsOn;
+  }
+
+  renderer.toneMappingExposure = w.exposure;
+}
+
+function randomWeather() {
+  const names = Object.keys(WEATHERS);
+  return names[Math.floor(Math.random() * names.length)];
+}
 
 /* ---------- Pitch ---------- */
 function makePitchTexture(margin) {
@@ -388,6 +486,8 @@ const ball = {
   vel: new THREE.Vector3(),
   owner: null, // player currently dribbling the ball
   receiver: null, // player a pass is aimed at (AI teammates stand off)
+  attractArmed: false, // true once a pass is made, until the assist engages
+  attractT: 0, // seconds left in the brief reception magnet
   looseCd: 0, // ball cannot be picked up until this expires (after a tackle)
 };
 ball.mesh.castShadow = true;
@@ -402,62 +502,25 @@ const teams = {
   red: { name: 'red', label: 'RED', dir: -1, score: 0, players: [], presser: null },
 };
 
+const SKINS = [0xf1c27d, 0xc68642, 0x8d5524, 0xe0ac69];
+
 function createPlayer(team) {
-  const shirt = new THREE.MeshStandardMaterial({ color: TEAM_COLORS[team.name], roughness: 0.7 });
-  const shorts = new THREE.MeshStandardMaterial({ color: '#f2f2f2', roughness: 0.8 });
-  const skinColor = ['#f1c27d', '#c68642', '#8d5524', '#e0ac69'][Math.floor(Math.random() * 4)];
-  const skin = new THREE.MeshStandardMaterial({ color: skinColor, roughness: 0.8 });
-  const boot = new THREE.MeshStandardMaterial({ color: '#16161a', roughness: 0.6 });
-
-  const group = new THREE.Group();
-  const model = new THREE.Group();
-  model.scale.setScalar(0.85);
-  group.add(model);
-
-  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.3, 0.35, 4, 12), shirt);
-  torso.position.y = 1.32;
-  model.add(torso);
-
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 20, 16), skin);
-  head.position.y = 2.0;
-  model.add(head);
-
-  const legs = [];
-  const arms = [];
-  for (const sx of [-1, 1]) {
-    const leg = new THREE.Group();
-    leg.position.set(sx * 0.16, 0.9, 0);
-    const upper = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.38, 0.24), shorts);
-    upper.position.y = -0.19;
-    const shin = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.4, 0.2), skin);
-    shin.position.y = -0.58;
-    const foot = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.12, 0.34), boot);
-    foot.position.set(0, -0.84, 0.06);
-    leg.add(upper, shin, foot);
-    model.add(leg);
-    legs.push(leg);
-
-    const arm = new THREE.Group();
-    arm.position.set(sx * 0.42, 1.6, 0);
-    const sleeve = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.25, 0.15), shirt);
-    sleeve.position.y = -0.12;
-    const forearm = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.35, 0.12), skin);
-    forearm.position.y = -0.42;
-    arm.add(sleeve, forearm);
-    model.add(arm);
-    arms.push(arm);
-  }
-
-  model.traverse((o) => {
-    if (o.isMesh) o.castShadow = true;
-  });
+  // low-poly character; shirt from the team colour, shorts a darker shade
+  const shirt = new THREE.Color(TEAM_COLORS[team.name]);
+  const shorts = shirt.clone().multiplyScalar(0.72);
+  const char = createCharacter(
+    { shirt: shirt.getHex(), shorts: shorts.getHex() },
+    { skin: SKINS[Math.floor(Math.random() * SKINS.length)], scale: 0.95 }
+  );
+  const group = char.object;
   scene.add(group);
 
   return {
     team: team.name,
     group,
-    legs,
-    arms,
+    char,
+    legs: char.legs,
+    arms: char.arms,
     vel: new THREE.Vector3(),
     heading: team.dir > 0 ? Math.PI / 2 : -Math.PI / 2,
     phase: 0,
@@ -657,6 +720,8 @@ function resetKickoff() {
   ball.vel.set(0, 0, 0);
   ball.owner = null;
   ball.receiver = null;
+  ball.attractArmed = false;
+  ball.attractT = 0;
   ball.looseCd = 0;
   teams.blue.presser = null;
   teams.red.presser = null;
@@ -667,11 +732,14 @@ function startMatch() {
   teams.blue.score = 0;
   teams.red.score = 0;
   matchTime = MATCH_TIME;
+  setWeather(randomWeather()); // a fresh sky every match
   resetKickoff();
   overlay.classList.add('hidden');
   state = 'kickoff';
   stateTimer = 1.4;
   showBanner('KICK OFF');
+  showToast(`Weather: ${WEATHERS[weather].label}`);
+  playWhistle();
 }
 
 function scoreGoal(teamName) {
@@ -681,6 +749,7 @@ function scoreGoal(teamName) {
   stateTimer = 2.8;
   ball.owner = null;
   controllers.resetCharges();
+  playCheer();
   showBanner(`GOAL!<small>${teams[teamName].label} SCORES</small>`, TEAM_COLORS[teamName]);
 }
 
@@ -694,6 +763,7 @@ function endMatch() {
   else html = `FULL TIME<small>DRAW ${b} - ${r}</small>`;
   html += '<small style="opacity:.8;font-size:.22em">Press Enter or R to play again</small>';
   showBanner(html);
+  playWhistle();
 }
 
 /* ---------- Input ---------- */
@@ -810,6 +880,10 @@ window.addEventListener('blur', () => {
 
 $startBtn.addEventListener('click', startMatch);
 
+// browsers require a user gesture before audio can play
+window.addEventListener('pointerdown', unlockAudio, { once: true });
+window.addEventListener('keydown', unlockAudio, { once: true });
+
 /* ---------- Kicking ---------- */
 function kickBall(p, dirX, dirZ, power) {
   ball.owner = null;
@@ -821,6 +895,7 @@ function kickBall(p, dirX, dirZ, power) {
   ball.vel.y = Math.max(0, power - 0.3) * 11;
   p.kickCd = 0.35;
   p.kickAnim = 0.25;
+  playKick(power);
 }
 
 /* ---------- Passing ---------- */
@@ -856,10 +931,13 @@ function doPass(p) {
 
   ball.owner = null;
   ball.receiver = mate;
+  ball.attractArmed = true; // reception assist arms on every pass
+  ball.attractT = 0;
   ball.vel.set(dx * speed, 0, dz * speed);
   p.kickCd = 0.35;
   p.kickAnim = 0.25;
   p.lostCd = Math.max(p.lostCd, 0.25); // passer can't instantly re-grab
+  playKick(0.45);
   return mate;
 }
 
@@ -973,6 +1051,33 @@ function dispossess(carrier, tackler) {
   ball.vel.set((dx * ca - dz * sa) * speed, 1.2, (dx * sa + dz * ca) * speed);
 }
 
+// reception assist: once an incoming pass reaches the marked receiver, ease the
+// receiver toward the ball for a very short window so it's easier to collect
+function attractReceiver(dt) {
+  const r = ball.receiver;
+  if (!r || ball.owner) {
+    ball.attractT = 0;
+    return;
+  }
+
+  const rp = r.group.position;
+  const dx = ball.pos.x - rp.x;
+  const dz = ball.pos.z - rp.z;
+  const d = Math.hypot(dx, dz) || 1;
+
+  // engage exactly once per pass, the first moment the ball is close enough
+  if (ball.attractArmed && d < RECEIVE_ATTRACT_R) {
+    ball.attractArmed = false;
+    ball.attractT = RECEIVE_ATTRACT_TIME;
+  }
+  if (ball.attractT <= 0) return;
+  ball.attractT -= dt;
+
+  const step = Math.min(RECEIVE_ATTRACT_PULL * dt, Math.max(0, d - 0.2));
+  rp.x = clamp(rp.x + (dx / d) * step, -(HALF_L - 0.3), HALF_L - 0.3);
+  rp.z = clamp(rp.z + (dz / d) * step, -(HALF_W - PLAYER_R), HALF_W - PLAYER_R);
+}
+
 // nearest eligible player picks up a loose ball
 function tryPossess() {
   if (ball.owner || ball.looseCd > 0 || ball.pos.y > 1.0) return;
@@ -982,6 +1087,8 @@ function tryPossess() {
   if (r && r.lostCd <= 0 && r.kickCd <= 0 && distToBall(r) < RECEIVE_R) {
     ball.owner = r;
     ball.receiver = null;
+    ball.attractArmed = false;
+    ball.attractT = 0;
     return;
   }
   if (Math.hypot(ball.vel.x, ball.vel.z) > POSSESS_MAX_V) return;
@@ -998,6 +1105,8 @@ function tryPossess() {
   if (best) {
     ball.owner = best;
     ball.receiver = null;
+    ball.attractArmed = false;
+    ball.attractT = 0;
   }
 }
 
@@ -1426,7 +1535,10 @@ function simulate(dt) {
   controllers.tickCharge(dt);
 
   stepBall(dt);
-  if (live) tryPossess();
+  if (live) {
+    attractReceiver(dt);
+    tryPossess();
+  }
 
   // goal detection
   if (live) {
@@ -1474,12 +1586,8 @@ function animatePlayers(dt, time) {
 
     const sp = Math.hypot(p.vel.x, p.vel.z);
     p.phase += sp * dt * 1.5;
-    const amp = Math.min(1, sp / 6) * 0.9;
-    const s = Math.sin(p.phase) * amp;
-    p.legs[0].rotation.x = s;
-    p.legs[1].rotation.x = -s;
-    p.arms[0].rotation.x = -s * 0.8;
-    p.arms[1].rotation.x = s * 0.8;
+    // the character module owns the walk cycle (blended by speed)
+    p.char.update(dt, sp);
 
     if (p.kickAnim > 0) {
       p.kickAnim -= dt;
@@ -1526,6 +1634,18 @@ function updateHud() {
   });
 }
 
+// crowd ambience follows the match; it swells briefly while a goal plays
+let fansOn = null;
+let fansLevel = null;
+function updateFans() {
+  const on = state === 'playing' || state === 'kickoff' || state === 'goal';
+  const level = state === 'goal' ? 1.6 : 1.0;
+  if (on === fansOn && level === fansLevel) return;
+  fansOn = on;
+  fansLevel = level;
+  setFans(on, level);
+}
+
 /* ---------- Main loop ---------- */
 let last = performance.now();
 let acc = 0;
@@ -1561,6 +1681,7 @@ function animate(now) {
 
   updateCamera(dt);
   updateHud();
+  updateFans();
   renderer.render(scene, camera);
 }
 renderer.setAnimationLoop(animate);
@@ -1572,5 +1693,6 @@ window.addEventListener('resize', () => {
 });
 
 // initial arrangement behind the menu
+setWeather('sunny');
 applyMode('solo');
 resetKickoff();
